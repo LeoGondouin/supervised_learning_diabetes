@@ -1,0 +1,168 @@
+---
+title: "TD sur la prédiction de diabète"
+output:
+  pdf_document: default
+date: "2023-03-09"
+---
+**Chargement des librairies
+```{r}
+library(FactoMineR)
+library(pls)
+library(plsdepot)
+library(MASS) 
+library(lars)
+library(dplyr)
+library(class)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(e1071)
+library(kernlab)
+```
+
+**Chargement des données**
+Veuillez modifier la variable "path" avec le répertoire ou se trouve le fichier
+```{r}
+path <- "C:/Users/lgond/Documents/M1 Info/App Sup Auto/Exam"
+setwd(path)
+df <- read.csv(file="diabetes.csv",header=T)
+```
+
+**Vérification de données manquantes**
+```{r}
+str(df)
+sum(is.na(df))
+```
+
+Il ne semble pas y avoir de données manquantes, de plus, aucune données n'est convertie en character ou factor, ce qui veut dire qu'il n'y a pas de string indiquant que les données sont manquantes sur quelques lignes à la place du NA (habituellement ? ou .)
+
+**Séparation des données catégorielles et numériques
+```{r}
+dfquali <- data.frame(Outcome=as.factor(df$Outcome))
+dfquanti <- select(df,-Outcome)
+```
+
+**Vérification des variances des variables**
+```{r}
+for(i in 1:ncol(df)){
+  if(var(df[,i])==0){
+    print(paste("Variance nulle pour la colonne ", colnames(df)[i]))
+  }
+}
+```
+Aucune variable ne semble ne pas avoir de dispersion
+
+
+**ACP sur les variables quantitatives**
+```{r}
+res.pca <- PCA(dfquanti, graph = FALSE)
+barplot(res.pca$eig[,2],main="Pourcentage de variance expliquée")
+plot(res.pca,choix = "var")
+plot(res.pca,choix = "ind")
+```
+
+**Séparation des échantillons tests et apprentissage**
+```{r}
+set.seed(1)
+sub <- sample(1:nrow(df),100)
+
+x_train=dfquanti[-sub,]
+x_test=dfquanti[sub,]
+y_train=dfquali[-sub,length(dfquali)]
+y_test=dfquali[sub,length(dfquali)]
+```
+
+**Elaboration de la prédiction à l'aide des knn**
+```{r}
+tbc <- c()
+for (k in 1:20){
+  res <- knn(x_train,x_test,y_train,k=k)
+  tbc[k] <- mean(res==y_test)
+}
+plot(1:20,tbc,ylim=c(0,1),xlab='k',ylab='taux de bons classement')
+
+dfkpourtbc <- cbind(1:20,tbc)
+
+colnames(dfkpourtbc)
+meilleurK <- dfkpourtbc[which.max(dfkpourtbc[,2]),]
+
+print(paste("Pour la méthode de prédiction knn, le meilleur k semble être",meilleurK[1]," avec un taux de bonne prédiction de ",round(meilleurK[2]*100,2),"%"))
+```
+**Elaboration de la prédiction à l'aide d'un arbre (CART)**
+Traçons l'arbre binaire avec la méthode CART
+```{r}
+dfco_app=data.frame(x_train,Outcome=y_train)
+modArbreCart=rpart(Outcome~.,data=dfco_app)
+predictionArbreCart <- predict(modArbreCart,newdata = x_test,type='class')
+rpart.plot(modArbreCart)
+```
+
+Consultons la prédiction
+```{r}
+print(paste("Prédiction avec l'arbre Binaire en méthode CART",round(mean(predictionArbreCart==y_test)*100,2),"%"))
+```
+```{r}
+modRdmForest <- randomForest(Outcome~.,data=dfco_app)
+predictionRdmForest <- predict(modRdmForest,newdata = x_test,type='class')
+print(paste("Prédiction avec randomForest",round(mean(predictionRdmForest==y_test)*100,2),"%"))
+```
+
+Pour les knns tunés au k donnant le plus de prédiction, l'arbre binaire méthode CART, et la forêt aléatoire on obtient une précision de 72%
+
+Comme c'est une classification binaire, nous pouvons essayer avec une régression logistique
+
+**Régression logistique**
+```{r}
+reglog <- glm(formula = (Outcome=="1") ~ .,data=df)
+summary(reglog)
+Outcome1.pred <- predict(reglog, type = "response", newdata = df)
+head(Outcome1.pred)
+
+matconfreg <- table(Outcome1.pred > 0.5, df$Outcome)
+
+txPrecisionmatconfreg <- sum(diag(matconfreg)[1]/rowSums(matconfreg)[1],diag(matconfreg)[2]/rowSums(matconfreg)[2])/nrow(matconfreg)*100
+print(paste("Le taux de précision da la prédiction de l'appétence de cartevp sur les données de test en régression logistique binaire est de ",round(txPrecisionmatconfreg,2),"%",sep=""))
+```
+La régression logistique est jusqu'à présent le meilleur modèle
+
+
+
+**Classification à l'aide d'un SVM**
+```{r}
+dfApp=as.data.frame(cbind(x_train,Y=y_train))
+dfTest=as.data.frame(cbind(x_test,Y=y_test))
+
+dfApp$Y <- as.factor(dfApp$Y)
+dfTest$Y <- as.factor(dfTest$Y)
+
+svm1=ksvm(Y~., data=dfApp,kernel="rbfdot",C=10)
+predictSVM = predict(svm1,newdata=dfTest,type="response")
+table(predictSVM, dfTest$Y)
+cat('taux de bons classements :',round(mean(predictSVM==dfTest$Y)*100),"%")
+```
+
+**Classification à l'aide d'un Réseau de neurone**
+```{r}
+library(glmnet)
+cvfit=cv.glmnet(as.matrix(dfApp[,-length(dfApp)]),dfApp$Y,
+family="binomial",parallel=TRUE)
+plot(cvfit)
+
+p=predict(cvfit, newx = as.matrix(dfTest[,-length(dfTest)]),
+s="lambda.1se",type ="class")
+
+which(cvfit$lambda==cvfit$lambda.1se)
+
+
+table(p,dfTest$Y)
+cat('taux de bons classements :',mean(p==dfTest$Y))
+```
+**Test des variables les plus importante pour la prédiction de diabete pour mon modèle ayant le mieux prédis (reg log)**
+```{r}
+reglog <- stepAIC(reglog,trace = F)
+summary(reglog)
+```
+Pour ma régression logistique, les variables ayant un fort impact sur le modèle sont Pregancies, Glucose,BloodPressure et BMI.
+
+J'aurais pu peut-être encore mieux prédire avec du bootstrap pour chacun de mes modèles.
+Il faut aussi faire attention, peut-être que dans le cas du diabète, le taux de bonne prédiction n'est peut être pas le meilleur indicateur de la qualité du modèle, il faudrait vérifier le nombre de prédiction fausse sur les patients prédit comme non diabétique étant en réalité diabétique (cela peut avoir de fortes conséquences)
